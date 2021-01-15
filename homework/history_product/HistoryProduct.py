@@ -17,22 +17,24 @@ class HistoryProduct:
     def __init__(self, primary_keys=None):
         self.primary_keys = primary_keys or ['id', 'name', 'score']
 
-    def get_history_product(self, old_dataframe: DataFrame, new_dataframe: DataFrame):
-        # None filter
-        inserted = new_dataframe.join(old_dataframe, on=self.primary_keys, how='anti') \
-            .withColumn('meta', lit('inserted')).withColumn('priority', lit(1))
-        deleted = old_dataframe.join(new_dataframe, on=self.primary_keys, how='anti') \
-            .withColumn('meta', lit('deleted')).withColumn('priority', lit(0))
-        not_changed = new_dataframe.join(old_dataframe, on=['id', 'name', 'score']) \
-            .withColumn('meta', lit('not_changed')).withColumn('priority', lit(1))
-        changed = new_dataframe.join(inserted, on=self.primary_keys, how='anti') \
-            .join(not_changed, on=self.primary_keys, how='anti') \
-            .withColumn('meta', lit('changed')).withColumn('priority', lit(1))
+    def __join_safe_null(self, left_df, right_df, how, keys=None):
+        keys = keys if keys else self.primary_keys
+        safe_keys = [getattr(left_df, key).eqNullSafe(getattr(right_df, key)) for key in keys]
+        return left_df.join(right_df, on=safe_keys, how=how)
 
-        inserted.show()
-        deleted.show()
-        not_changed.show()
-        changed.show()
+    def get_history_product(self, old_dataframe: DataFrame, new_dataframe: DataFrame):
+        inserted = self.__join_safe_null(new_dataframe, old_dataframe, how='anti') \
+            .withColumn('meta', lit('inserted')).withColumn('priority', lit(1))
+
+        deleted = self.__join_safe_null(old_dataframe, new_dataframe, how='anti') \
+            .withColumn('meta', lit('deleted')).withColumn('priority', lit(0))
+
+        not_changed = self.__join_safe_null(new_dataframe, old_dataframe, how='semi', keys=['id', 'name', 'score']) \
+            .withColumn('meta', lit('not_changed')).withColumn('priority', lit(1))
+
+        pre_changed = self.__join_safe_null(new_dataframe, inserted, how='anti')
+        changed = self.__join_safe_null(pre_changed, not_changed, how='anti') \
+            .withColumn('meta', lit('changed')).withColumn('priority', lit(1))
 
         return inserted.union(deleted).union(not_changed).union(changed) \
             .sort(asc('id'), asc('priority')) \
